@@ -1,0 +1,330 @@
+# Construit l'APK de la fiche Cyberpunk RED dans le cloud GitHub.
+# Il suffit d'avoir "index.html" (la fiche) à la racine du dépôt.
+# Facultatif : ajoutez "icon.png" (carré) à la racine pour votre propre icône.
+name: Construire l'APK
+
+on:
+  workflow_dispatch:
+  push:
+
+permissions:
+  contents: write
+
+env:
+  APP_NAME: "Fiche Cyberpunk RED"
+  APP_ID: "com.fiche.cpr"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Préparer le SDK Android (déjà installé sur GitHub)
+        run: |
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          set +e
+          yes | "$SDKM" --licenses > /dev/null 2>&1
+          "$SDKM" --install "platforms;android-34" "build-tools;34.0.0" > /dev/null 2>&1
+          exit 0
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Générer le projet Android
+        run: |
+          mkdir -p app/src/main/java/com/fiche/cpr app/src/main/assets app/src/main/res/mipmap-xxxhdpi app/src/main/res/values
+          cp index.html app/src/main/assets/index.html
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "FicheCPR"
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx3g
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+          android {
+              namespace 'com.fiche.cpr'
+              compileSdk 34
+              defaultConfig {
+                  applicationId '__APPID__'
+                  minSdk 29
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          dependencies {
+              implementation 'androidx.webkit:webkit:1.11.0'
+          }
+          EOF
+          sed -i "s|__APPID__|$APP_ID|" app/build.gradle
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.VIBRATE" />
+              <application
+                  android:label="@string/app_name"
+                  android:icon="@mipmap/ic_launcher"
+                  android:allowBackup="true"
+                  android:theme="@android:style/Theme.Black.NoTitleBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          printf '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <string name="app_name">%s</string>\n</resources>\n' "$APP_NAME" > app/src/main/res/values/strings.xml
+
+          cat > app/src/main/java/com/fiche/cpr/MainActivity.java <<'EOF'
+          package com.fiche.cpr;
+
+          import android.app.Activity;
+          import android.content.ContentValues;
+          import android.content.Intent;
+          import android.content.IntentFilter;
+          import android.net.Uri;
+          import android.os.BatteryManager;
+          import android.os.Bundle;
+          import android.provider.MediaStore;
+          import android.view.View;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.ValueCallback;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceResponse;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.Toast;
+          import androidx.webkit.WebViewAssetLoader;
+          import java.io.OutputStream;
+          import java.nio.charset.StandardCharsets;
+
+          public class MainActivity extends Activity {
+              private WebView wv;
+              private ValueCallback<Uri[]> fileCb;
+              private boolean full = false;
+              private static final int REQ = 1;
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  getWindow().setStatusBarColor(0xFF120A05);
+                  getWindow().setNavigationBarColor(0xFF120A05);
+                  wv = new WebView(this);
+                  wv.setBackgroundColor(0xFF120A05);
+                  setContentView(wv);
+                  WebSettings s = wv.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setAllowFileAccess(false);
+                  final WebViewAssetLoader loader = new WebViewAssetLoader.Builder()
+                      .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this))
+                      .build();
+                  wv.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
+                          return loader.shouldInterceptRequest(r.getUrl());
+                      }
+                  });
+                  wv.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> cb, FileChooserParams p) {
+                          if (fileCb != null) fileCb.onReceiveValue(null);
+                          fileCb = cb;
+                          try {
+                              startActivityForResult(p.createIntent(), REQ);
+                          } catch (Exception e) {
+                              fileCb = null;
+                              return false;
+                          }
+                          return true;
+                      }
+                  });
+                  wv.addJavascriptInterface(new Bridge(), "AndroidApp");
+                  wv.loadUrl("https://appassets.androidplatform.net/assets/index.html");
+              }
+
+              @Override
+              protected void onActivityResult(int rq, int rs, Intent d) {
+                  if (rq == REQ) {
+                      if (fileCb != null) {
+                          fileCb.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(rs, d));
+                          fileCb = null;
+                      }
+                  } else {
+                      super.onActivityResult(rq, rs, d);
+                  }
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (wv.canGoBack()) wv.goBack();
+                  else super.onBackPressed();
+              }
+
+              private void setImmersive(boolean on) {
+                  View v = getWindow().getDecorView();
+                  if (on) {
+                      v.setSystemUiVisibility(View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                          | View.SYSTEM_UI_FLAG_FULLSCREEN
+                          | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                          | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                          | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                          | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+                  } else {
+                      v.setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+                  }
+              }
+
+              public class Bridge {
+                  @JavascriptInterface
+                  public void toggleFullscreen() {
+                      runOnUiThread(() -> {
+                          full = !full;
+                          setImmersive(full);
+                      });
+                  }
+
+                  @JavascriptInterface
+                  public void saveFile(String name, String data) {
+                      String msg;
+                      try {
+                          ContentValues cv = new ContentValues();
+                          cv.put(MediaStore.Downloads.DISPLAY_NAME, name);
+                          cv.put(MediaStore.Downloads.MIME_TYPE, "application/json");
+                          Uri u = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
+                          OutputStream o = getContentResolver().openOutputStream(u);
+                          o.write(data.getBytes(StandardCharsets.UTF_8));
+                          o.close();
+                          msg = "Sauvegardé dans Téléchargements";
+                      } catch (Exception e) {
+                          msg = "Sauvegarde impossible";
+                      }
+                      final String m = msg;
+                      runOnUiThread(() -> Toast.makeText(MainActivity.this, m, Toast.LENGTH_LONG).show());
+                  }
+
+                  @JavascriptInterface
+                  public String battery() {
+                      Intent i = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+                      if (i == null) return "";
+                      int l = i.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+                      int sc = i.getIntExtra(BatteryManager.EXTRA_SCALE, 100);
+                      int st = i.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
+                      boolean ch = st == BatteryManager.BATTERY_STATUS_CHARGING
+                          || st == BatteryManager.BATTERY_STATUS_FULL;
+                      return (l * 100 / sc) + "," + (ch ? 1 : 0);
+                  }
+              }
+          }
+          EOF
+
+      - name: Créer l'icône
+        run: |
+          pip install pillow -q --break-system-packages || true
+          python3 - <<'EOF'
+          import math, os
+          from PIL import Image, ImageDraw
+          out = 'app/src/main/res/mipmap-xxxhdpi/ic_launcher.png'
+          if os.path.exists('icon.png'):
+              Image.open('icon.png').convert('RGBA').resize((192, 192)).save(out)
+          else:
+              S = 192
+              im = Image.new('RGB', (S, S), (18, 10, 5))
+              d = ImageDraw.Draw(im)
+              c = S / 2
+              def hexa(r):
+                  return [(c + r * math.cos(math.radians(60 * i + 30)), c + r * math.sin(math.radians(60 * i + 30))) for i in range(6)]
+              d.polygon(hexa(86), outline=(255, 154, 0), width=7)
+              d.polygon(hexa(58), fill=(255, 154, 0))
+              d.polygon(hexa(30), fill=(18, 10, 5))
+              im.save(out)
+          EOF
+
+      - name: Embarquer les polices (hors ligne)
+        continue-on-error: true
+        run: |
+          python3 - <<'EOF'
+          import re, os, urllib.request
+          ua = 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36'
+          link = re.search(r'https://fonts\.googleapis\.com/css2[^"]*', open('index.html', encoding='utf-8').read()).group(0)
+          css = urllib.request.urlopen(urllib.request.Request(link.replace('&amp;', '&'), headers={'User-Agent': ua})).read().decode()
+          os.makedirs('app/src/main/assets/fonts', exist_ok=True)
+          def grab(m):
+              url = m.group(1)
+              name = re.sub(r'\W', '_', url.split('/')[-1]) + '.woff2'
+              urllib.request.urlretrieve(url, 'app/src/main/assets/fonts/' + name)
+              return 'url(fonts/' + name + ')'
+          css = re.sub(r'url\((https://[^)]+)\)', grab, css)
+          open('app/src/main/assets/fonts.css', 'w').write(css)
+          h = open('app/src/main/assets/index.html', encoding='utf-8').read()
+          h = re.sub(r'https://fonts\.googleapis\.com/css2[^"]*', 'fonts.css', h)
+          open('app/src/main/assets/index.html', 'w', encoding='utf-8').write(h)
+          EOF
+
+      - name: Compiler l'APK
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Préparer le fichier
+        run: cp app/build/outputs/apk/debug/app-debug.apk Fiche-Cyberpunk-RED.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Fiche-Cyberpunk-RED-apk
+          path: Fiche-Cyberpunk-RED.apk
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-${{ github.run_number }}
+          name: "APK n°${{ github.run_number }}"
+          files: Fiche-Cyberpunk-RED.apk
